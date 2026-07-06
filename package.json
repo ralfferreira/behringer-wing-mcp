@@ -1,0 +1,56 @@
+{
+  "name": "behringer-wing-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for Behringer WING digital mixers over OSC/UDP.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "behringer-wing-mcp": "dist/index.js",
+    "wing-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/index.js",
+    "dist/osc.js",
+    "dist/wing.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "npm run build && node --test dist/*.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "behringer",
+    "wing",
+    "osc",
+    "udp",
+    "audio",
+    "mixer"
+  ],
+  "author": "Ralf Ferreira",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ralfferreira/behringer-wing-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ralfferreira/behringer-wing-mcp/issues"
+  },
+  "homepage": "https://github.com/ralfferreira/behringer-wing-mcp#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^6.0.3"
+  }
+}
