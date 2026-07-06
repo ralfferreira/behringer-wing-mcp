@@ -13,9 +13,12 @@ This is an early open-source implementation. The typed tools cover common strip
 operations:
 
 - set fader level
+- adjust fader level relatively
 - mute or unmute a strip
 - set pan
 - set scribble-strip name
+- find/list strips by scribble-strip name
+- set bus send level from typed source/destination fields
 - read a small strip status snapshot
 - read or write a raw OSC address as an escape hatch
 
@@ -101,10 +104,14 @@ Windows example path:
 | Tool | Description |
 | --- | --- |
 | `set_fader` | Set a strip fader level in dB. |
+| `adjust_fader` | Change a strip fader relatively by a dB delta. |
 | `set_mute` | Mute or unmute a strip. |
 | `set_pan` | Set strip pan from `-100` left to `100` right. |
 | `set_name` | Set a strip scribble-strip name. |
 | `get_strip_status` | Read name, fader, mute, and pan for one strip. |
+| `find_strip_by_name` | Search scribble-strip names across strip kinds. |
+| `list_strips` | Read a compact live list of strip IDs and names, optionally with status. |
+| `set_bus_send` | Set a channel, aux, or bus send level to a bus destination. |
 | `osc_get` | Read any raw OSC address. |
 | `osc_set` | Write any raw OSC address, then read it back. |
 
@@ -118,6 +125,30 @@ Supported typed strip kinds:
 | `main` | `1-4` | Main buses. |
 | `mtx` | `1-8` | Matrices. |
 | `dca` | `1-16` | DCAs in the remote-control model. |
+
+## Natural-language helper examples
+
+These tools are meant to let MCP clients work from plain prompts without
+needing to know every OSC leaf.
+
+```text
+adjust_fader kind="ch" index=12 delta_db=-3
+find_strip_by_name query="pastor mic"
+list_strips kinds=["ch","aux","bus"] include_status=false
+set_bus_send source_kind="ch" source_index=1 bus=5 db=-12 enabled=true
+```
+
+`find_strip_by_name` returns ranked matches with `kind`, `index`, `id`, `name`,
+and `score`. If multiple matches have the same top score, prefer calling write
+tools with an explicit `kind` and `index`.
+
+`list_strips` performs live request/response reads. By default it reads strip
+names only for a compact map of IDs to labels; set `include_status=true` to also
+read fader, mute, and pan values.
+
+`set_bus_send` writes `/<source>/<index>/send/<bus>/lvl` and accepts source
+kinds `ch`, `aux`, and `bus`. When `enabled` is provided, it also writes the
+send `on` state. Like every write helper, it is blocked by `WING_READ_ONLY=true`.
 
 ## Raw OSC examples
 
