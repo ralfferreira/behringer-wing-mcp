@@ -16,7 +16,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { OscClient } from "./osc.js";
-import { Wing, StripKind, argSummary } from "./wing.js";
+import { Wing, argSummary } from "./wing.js";
+import type { BusSendSourceKind, StripKind } from "./wing.js";
 
 const VERSION = "0.1.0";
 
@@ -57,6 +58,11 @@ const server = new McpServer({ name: "behringer-wing-mcp", version: VERSION });
 const stripKind = z
   .enum(["ch", "aux", "bus", "main", "mtx", "dca"])
   .describe("Strip type: ch (input 1-40), aux (1-8), bus (1-16), main (1-4), mtx (matrix 1-8), dca (1-16)");
+const busSendSourceKind = z.enum(["ch", "aux", "bus"]).describe("Source strip type for a bus send: ch, aux, or bus.");
+
+function requestedKinds(kinds?: StripKind[]): StripKind[] | undefined {
+  return kinds && kinds.length > 0 ? kinds : undefined;
+}
 
 function errText(err: unknown) {
   return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
@@ -77,6 +83,28 @@ server.tool(
       assertWritable();
       const v = await wing.setFader(kind as StripKind, index, db);
       return { content: [{ type: "text", text: `${kind}/${index} fader -> ${v} dB` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "adjust_fader",
+  "Adjust a strip fader relatively by a dB delta, for example lower channel 12 by 3 dB. Reads the current fader first, then writes the clamped result.",
+  { kind: stripKind, index: z.number().int().min(1), delta_db: z.number() },
+  async ({ kind, index, delta_db }) => {
+    try {
+      assertWritable();
+      const result = await wing.adjustFader(kind as StripKind, index, delta_db);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${kind}/${index} fader ${Number(result.previous.toFixed(2))} dB -> ${Number(result.target.toFixed(2))} dB (confirmed ${result.confirmed} dB)`,
+          },
+        ],
+      };
     } catch (err) {
       return errText(err);
     }
@@ -136,6 +164,65 @@ server.tool(
     try {
       const status = await wing.stripStatus(kind as StripKind, index);
       return { content: [{ type: "text", text: `${kind}/${index}: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "find_strip_by_name",
+  "Search scribble-strip names across strip kinds. If multiple matches are returned with the same top score, use an explicit kind/index before writing.",
+  {
+    query: z.string().min(1),
+    kinds: z.array(stripKind).optional().describe("Optional strip kinds to search. Defaults to all kinds."),
+    max_results: z.number().int().min(1).max(25).optional(),
+  },
+  async ({ query, kinds, max_results }) => {
+    try {
+      const matches = await wing.findStripsByName(query, requestedKinds(kinds as StripKind[] | undefined), max_results ?? 10);
+      const topScore = matches[0]?.score;
+      const ambiguous = topScore !== undefined && matches.filter((match) => match.score === topScore).length > 1;
+      return { content: [{ type: "text", text: JSON.stringify({ query, ambiguous, matches }) }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "list_strips",
+  "Read a compact live list of strip IDs and scribble-strip names. Set include_status to also read fader, mute, and pan.",
+  {
+    kinds: z.array(stripKind).optional().describe("Optional strip kinds to list. Defaults to all kinds."),
+    include_status: z.boolean().optional(),
+  },
+  async ({ kinds, include_status }) => {
+    try {
+      const strips = await wing.listStrips(requestedKinds(kinds as StripKind[] | undefined), include_status ?? false);
+      return { content: [{ type: "text", text: JSON.stringify(strips) }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_bus_send",
+  "Set the send level from a channel, aux, or bus source to a bus destination in dB. Optionally enable or disable the send.",
+  {
+    source_kind: busSendSourceKind,
+    source_index: z.number().int().min(1),
+    bus: z.number().int().min(1).max(16),
+    db: z.number().min(-144).max(10),
+    enabled: z.boolean().optional(),
+  },
+  async ({ source_kind, source_index, bus, db, enabled }) => {
+    try {
+      assertWritable();
+      const result = await wing.setBusSend(source_kind as BusSendSourceKind, source_index, bus, db, enabled);
+      const enabledText = result.enabled === undefined ? "" : `, enabled -> ${result.enabled}`;
+      return { content: [{ type: "text", text: `${source_kind}/${source_index} send to bus/${bus} level -> ${result.level} dB${enabledText}` }] };
     } catch (err) {
       return errText(err);
     }
