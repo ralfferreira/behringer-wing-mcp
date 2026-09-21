@@ -68,21 +68,24 @@ function errText(err: unknown) {
   return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
 }
 
-function assertWritable() {
+async function assertWritable() {
   if (readOnly) {
-    throw new Error("WING_READ_ONLY is enabled; write tools are disabled");
+    throw new Error(
+      "This MCP server is in read-only mode (WING_READ_ONLY). Mute, fader, and other changes are blocked until that setting is turned off."
+    );
   }
+  await wing.assertOscWritable();
 }
 
 server.tool(
   "set_fader",
-  "Set a fader level in dB on the WING console. Range -144 (=-inf) to +10.",
+  "Set a channel/bus/DCA fader level in dB. Use -144 for silence (-oo). Range -144 to +10. Prefer find_strip_by_name first when the operator names a strip.",
   { kind: stripKind, index: z.number().int().min(1), db: z.number().min(-144).max(10) },
   async ({ kind, index, db }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const v = await wing.setFader(kind as StripKind, index, db);
-      return { content: [{ type: "text", text: `${kind}/${index} fader -> ${v} dB` }] };
+      return { content: [{ type: "text", text: `${kind}/${index} fader is now ${v}` }] };
     } catch (err) {
       return errText(err);
     }
@@ -91,17 +94,17 @@ server.tool(
 
 server.tool(
   "adjust_fader",
-  "Adjust a strip fader relatively by a dB delta, for example lower channel 12 by 3 dB. Reads the current fader first, then writes the clamped result.",
+  "Raise or lower a fader by a relative amount in dB (example: -3 lowers by 3 dB). Prefer find_strip_by_name first when the operator names a strip.",
   { kind: stripKind, index: z.number().int().min(1), delta_db: z.number() },
   async ({ kind, index, delta_db }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const result = await wing.adjustFader(kind as StripKind, index, delta_db);
       return {
         content: [
           {
             type: "text",
-            text: `${kind}/${index} fader ${Number(result.previous.toFixed(2))} dB -> ${Number(result.target.toFixed(2))} dB (confirmed ${result.confirmed} dB)`,
+            text: `${kind}/${index} fader ${Number(result.previous.toFixed(1))} dB -> ${result.confirmed}`,
           },
         ],
       };
@@ -113,13 +116,13 @@ server.tool(
 
 server.tool(
   "set_mute",
-  "Mute or unmute a strip on the WING console.",
+  "Mute or unmute a channel, bus, main, matrix, or DCA. Prefer find_strip_by_name first when the operator names a strip.",
   { kind: stripKind, index: z.number().int().min(1), muted: z.boolean() },
   async ({ kind, index, muted }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const v = await wing.setMute(kind as StripKind, index, muted);
-      return { content: [{ type: "text", text: `${kind}/${index} mute -> ${v}` }] };
+      return { content: [{ type: "text", text: `${kind}/${index} is now ${v}` }] };
     } catch (err) {
       return errText(err);
     }
@@ -132,7 +135,7 @@ server.tool(
   { kind: stripKind, index: z.number().int().min(1), pan: z.number().min(-100).max(100) },
   async ({ kind, index, pan }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const v = await wing.setPan(kind as StripKind, index, pan);
       return { content: [{ type: "text", text: `${kind}/${index} pan -> ${v}` }] };
     } catch (err) {
@@ -147,7 +150,7 @@ server.tool(
   { kind: stripKind, index: z.number().int().min(1), name: z.string().max(16) },
   async ({ kind, index, name }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const v = await wing.setName(kind as StripKind, index, name);
       return { content: [{ type: "text", text: `${kind}/${index} name -> ${v}` }] };
     } catch (err) {
@@ -158,7 +161,7 @@ server.tool(
 
 server.tool(
   "get_strip_status",
-  "Read name, fader (dB), mute, and pan of one strip.",
+  "Read the surface name, stored name, fader, mute, and pan for one strip.",
   { kind: stripKind, index: z.number().int().min(1) },
   async ({ kind, index }) => {
     try {
@@ -172,7 +175,7 @@ server.tool(
 
 server.tool(
   "find_strip_by_name",
-  "Search scribble-strip names across strip kinds. If multiple matches are returned with the same top score, use an explicit kind/index before writing.",
+  "Find strips by the name shown on the mixer surface (and by the stored name if different). Use this before mute/fader changes when the operator says a name like Caixa or VS. If several matches share the top score, ask which one or use an explicit kind/index.",
   {
     query: z.string().min(1),
     kinds: z.array(stripKind).optional().describe("Optional strip kinds to search. Defaults to all kinds."),
@@ -192,7 +195,7 @@ server.tool(
 
 server.tool(
   "list_strips",
-  "Read a compact live list of strip IDs and scribble-strip names. Set include_status to also read fader, mute, and pan.",
+  "List strip IDs with the names shown on the mixer surface. Set include_status to also read fader, mute, and pan.",
   {
     kinds: z.array(stripKind).optional().describe("Optional strip kinds to list. Defaults to all kinds."),
     include_status: z.boolean().optional(),
@@ -219,7 +222,7 @@ server.tool(
   },
   async ({ source_kind, source_index, bus, db, enabled }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const result = await wing.setBusSend(source_kind as BusSendSourceKind, source_index, bus, db, enabled);
       const enabledText = result.enabled === undefined ? "" : `, enabled -> ${result.enabled}`;
       return { content: [{ type: "text", text: `${source_kind}/${source_index} send to bus/${bus} level -> ${result.level} dB${enabledText}` }] };
@@ -253,7 +256,7 @@ server.tool(
   },
   async ({ address, value, force_type }) => {
     try {
-      assertWritable();
+      await assertWritable();
       const msg = await osc.setAndConfirm(address, value, force_type);
       return { content: [{ type: "text", text: `${address} -> ${argSummary(msg)}` }] };
     } catch (err) {

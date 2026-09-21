@@ -45,11 +45,13 @@ npm run build
 
 ## Configure the console
 
-On the console, open the remote/network settings and make sure:
+On the WING touchscreen open **Setup → Remote** and check:
 
-- OSC remote control is enabled
-- OSC remote lock is off
-- the console has an IP address reachable from the machine running the MCP server
+1. OSC remote control is enabled
+2. **Remote Lock for OSC is OFF** (if this stays ON, the assistant can read the desk but mute/fader changes do nothing)
+3. The console IP is reachable from the computer running this MCP server
+
+If someone says “the AI answered OK but the fader did not move,” check Remote Lock first.
 
 Avoid exposing the console network to the public internet. The OSC control
 surface is intended for trusted local networks.
@@ -109,8 +111,8 @@ Windows example path:
 | `set_pan` | Set strip pan from `-100` left to `100` right. |
 | `set_name` | Set a strip scribble-strip name. |
 | `get_strip_status` | Read name, fader, mute, and pan for one strip. |
-| `find_strip_by_name` | Search scribble-strip names across strip kinds. |
-| `list_strips` | Read a compact live list of strip IDs and names, optionally with status. |
+| `find_strip_by_name` | Find strips by the name on the mixer surface (and the stored name if different). |
+| `list_strips` | List strip IDs with surface names, optionally with status. |
 | `set_bus_send` | Set a channel, aux, or bus send level to a bus destination. |
 | `osc_get` | Read any raw OSC address. |
 | `osc_set` | Write any raw OSC address, then read it back. |
