@@ -13,12 +13,12 @@
  *   dca:  1-16   DCAs
  *
  * Frequently used leaves under a strip:
- *   /fdr   fader level in dB (float; -144 = -inf)
- *   /mute  1 = muted, 0 = unmuted
- *   /pan   -100..+100
- *   /name  scribble name (string)
- *   /col   scribble color index
- *   /led   ...
+ *   /fdr    fader level in dB (float; -144 = -inf)
+ *   /mute   1 = muted, 0 = unmuted
+ *   /pan    -100..+100
+ *   /name   stored scribble name
+ *   /$name  surface display name (what the operator sees; may differ from /name)
+ *   /col    scribble color index
  *
  * Verify raw leaves against the Remote Protocols document for your firmware.
  */
@@ -47,7 +47,10 @@ export interface StripRef {
 
 export interface StripSummary extends StripRef {
   id: string;
+  /** Surface display name: prefers `/$name` when set, else `/name`. */
   name: string;
+  /** Stored `/name` when it differs from the surface display name. */
+  storedName?: string;
   fader?: string;
   mute?: string;
   pan?: string;
@@ -105,6 +108,46 @@ function firstNumericArg(msg: OscMessage, address: string): number {
   return value;
 }
 
+export const OSC_RONLY_ADDRESS = "/$ctl/OSC/ronly";
+export const OSC_RONLY_ERROR =
+  "Cannot change the mixer: OSC Remote Lock is ON. On the WING screen open Setup → Remote → Remote Lock and turn OSC lock OFF, then try again.";
+
+export const WRITE_DID_NOT_STICK_HINT =
+  "The mixer did not apply the change. On the WING screen open Setup → Remote → Remote Lock and turn OSC lock OFF, then try again.";
+
+/** Prefer the int32 in a WING `,sfi` reply; fall back to the first coercible arg. */
+export function oscIntFlag(msg: OscMessage, address: string): number {
+  const intArg = msg.args.find((a) => a.type === "i");
+  if (typeof intArg?.value === "number" && Number.isInteger(intArg.value)) {
+    return intArg.value;
+  }
+  return firstNumericArg(msg, address);
+}
+
+/** dB from a WING `,sff` fader reply (last float is the dB value). */
+export function faderDbFromReply(msg: OscMessage, address: string): number {
+  const floats = msg.args.filter((a) => a.type === "f" && typeof a.value === "number");
+  if (floats.length > 0) {
+    return floats[floats.length - 1]!.value as number;
+  }
+  return firstNumericArg(msg, address);
+}
+
+export function formatFaderDb(db: number): string {
+  if (db <= -143.5) return "-oo dB";
+  return `${Number(db.toFixed(1))} dB`;
+}
+
+export function formatMuteState(muted: boolean): string {
+  return muted ? "muted" : "unmuted";
+}
+
+function assertWriteStuck(ok: boolean): void {
+  if (!ok) {
+    throw new Error(WRITE_DID_NOT_STICK_HINT);
+  }
+}
+
 export function normalizeStripName(value: string): string {
   return value
     .normalize("NFD")
@@ -129,6 +172,28 @@ function matchScore(normalizedQuery: string, name: string): number | undefined {
   return undefined;
 }
 
+function bestNameScore(normalizedQuery: string, ...names: Array<string | undefined>): number | undefined {
+  let best: number | undefined;
+  for (const name of names) {
+    if (!name) continue;
+    const score = matchScore(normalizedQuery, name);
+    if (score !== undefined && (best === undefined || score > best)) {
+      best = score;
+    }
+  }
+  return best;
+}
+
+/** Pick the scribble the operator sees on the surface (`/$name`) when present. */
+export function surfaceName(storedName: string, displayName: string): { name: string; storedName?: string } {
+  const stored = storedName.trim();
+  const display = displayName.trim();
+  if (display && display !== "(no value returned)") {
+    return display === stored ? { name: display } : { name: display, storedName: stored || undefined };
+  }
+  return { name: stored };
+}
+
 export function findStripNameMatches(query: string, strips: StripSummary[], maxResults = 10): StripNameMatch[] {
   const normalizedQuery = normalizeStripName(query);
   if (!normalizedQuery) {
@@ -137,7 +202,7 @@ export function findStripNameMatches(query: string, strips: StripSummary[], maxR
 
   return strips
     .map((strip) => {
-      const score = matchScore(normalizedQuery, strip.name);
+      const score = bestNameScore(normalizedQuery, strip.name, strip.storedName);
       return score === undefined ? undefined : { ...strip, score };
     })
     .filter((strip): strip is StripNameMatch => strip !== undefined)
@@ -159,24 +224,56 @@ export function stripRefs(kinds: StripKind[] = STRIP_KINDS): StripRef[] {
 export class Wing {
   constructor(readonly osc: OscClient) {}
 
+  /**
+   * Fail before writes when the console has OSC Remote Lock / read-only enabled.
+   * Live SETs are otherwise silently ignored while GETs still succeed.
+   */
+  async assertOscWritable(): Promise<void> {
+    const msg = await this.osc.get(OSC_RONLY_ADDRESS);
+    if (oscIntFlag(msg, OSC_RONLY_ADDRESS) === 1) {
+      throw new Error(OSC_RONLY_ERROR);
+    }
+  }
+
+  async readStripNames(kind: StripKind, index: number): Promise<{ name: string; storedName?: string }> {
+    const stored = argSummary(await this.osc.get(stripAddress(kind, index, "name")));
+    let display = "";
+    try {
+      display = argSummary(await this.osc.get(stripAddress(kind, index, "$name")));
+    } catch {
+      // Some strip kinds may not expose /$name; fall back to /name.
+    }
+    return surfaceName(stored, display);
+  }
+
   /** Fader in dB. Use -144 (or lower) for -oo. */
   async setFader(kind: StripKind, index: number, db: number): Promise<string> {
+    const address = stripAddress(kind, index, "fdr");
     const clamped = clampDb(db);
-    const msg = await this.osc.setAndConfirm(stripAddress(kind, index, "fdr"), clamped, "f");
-    return argSummary(msg);
+    const msg = await this.osc.setAndConfirm(address, clamped, "f");
+    const confirmed = faderDbFromReply(msg, address);
+    const bothInf = clamped <= -143.5 && confirmed <= -143.5;
+    assertWriteStuck(bothInf || Math.abs(confirmed - clamped) <= 0.75);
+    return formatFaderDb(confirmed);
   }
 
   async adjustFader(kind: StripKind, index: number, deltaDb: number): Promise<{ previous: number; target: number; confirmed: string }> {
     const address = stripAddress(kind, index, "fdr");
-    const current = firstNumericArg(await this.osc.get(address), address);
+    const current = faderDbFromReply(await this.osc.get(address), address);
     const target = clampDb(current + deltaDb);
     const msg = await this.osc.setAndConfirm(address, target, "f");
-    return { previous: current, target, confirmed: argSummary(msg) };
+    const confirmed = faderDbFromReply(msg, address);
+    const bothInf = target <= -143.5 && confirmed <= -143.5;
+    assertWriteStuck(bothInf || Math.abs(confirmed - target) <= 0.75);
+    return { previous: current, target, confirmed: formatFaderDb(confirmed) };
   }
 
   async setMute(kind: StripKind, index: number, muted: boolean): Promise<string> {
-    const msg = await this.osc.setAndConfirm(stripAddress(kind, index, "mute"), muted ? 1 : 0, "i");
-    return argSummary(msg);
+    const address = stripAddress(kind, index, "mute");
+    const target = muted ? 1 : 0;
+    const msg = await this.osc.setAndConfirm(address, target, "i");
+    assertWriteStuck(oscIntFlag(msg, address) === target);
+    return formatMuteState(muted);
   }
 
   async setPan(kind: StripKind, index: number, pan: number): Promise<string> {
@@ -211,7 +308,9 @@ export class Wing {
     for (const { kind, index } of stripRefs(kinds)) {
       const summary: StripSummary = { kind, index, id: stripId(kind, index), name: "" };
       try {
-        summary.name = argSummary(await this.osc.get(stripAddress(kind, index, "name")));
+        const names = await this.readStripNames(kind, index);
+        summary.name = names.name;
+        if (names.storedName) summary.storedName = names.storedName;
         if (includeStatus) {
           summary.fader = argSummary(await this.osc.get(stripAddress(kind, index, "fdr")));
           summary.mute = argSummary(await this.osc.get(stripAddress(kind, index, "mute")));
@@ -231,7 +330,7 @@ export class Wing {
 
   /** Read a small status snapshot of one strip. */
   async stripStatus(kind: StripKind, index: number): Promise<Record<string, string>> {
-    const leaves = ["name", "fdr", "mute", "pan"];
+    const leaves = ["name", "$name", "fdr", "mute", "pan"];
     const out: Record<string, string> = {};
     for (const leaf of leaves) {
       try {

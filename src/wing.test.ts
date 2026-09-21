@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { busSendAddress, clampDb, findStripNameMatches, normalizeStripName, stripAddress } from "./wing.js";
+import type { OscClient, OscMessage } from "./osc.js";
+import {
+  busSendAddress,
+  clampDb,
+  faderDbFromReply,
+  findStripNameMatches,
+  formatFaderDb,
+  formatMuteState,
+  normalizeStripName,
+  oscIntFlag,
+  OSC_RONLY_ERROR,
+  stripAddress,
+  surfaceName,
+  WRITE_DID_NOT_STICK_HINT,
+  Wing,
+} from "./wing.js";
 
 test("builds WING strip addresses", () => {
   assert.equal(stripAddress("ch", 1, "fdr"), "/ch/1/fdr");
@@ -72,4 +87,114 @@ test("returns limited partial name matches", () => {
     matches.map((match) => match.id),
     ["ch/1"]
   );
+});
+
+test("prefers surface /$name over stored /name", () => {
+  assert.deepEqual(surfaceName("TECLADO L", "VS"), { name: "VS", storedName: "TECLADO L" });
+  assert.deepEqual(surfaceName("VS", "VS"), { name: "VS" });
+  assert.deepEqual(surfaceName("TECLADO L", ""), { name: "TECLADO L" });
+});
+
+test("matches find queries against surface or stored names", () => {
+  const matches = findStripNameMatches("VS", [
+    { kind: "ch", index: 17, id: "ch/17", name: "VS", storedName: "TECLADO L" },
+    { kind: "ch", index: 19, id: "ch/19", name: "GUIDE", storedName: "VS" },
+  ]);
+
+  assert.deepEqual(
+    matches.map((match) => match.id),
+    ["ch/17", "ch/19"]
+  );
+  assert.equal(matches[0]?.score, 100);
+  assert.equal(matches[1]?.score, 100);
+});
+
+test("reads the int32 from a WING sfi flag reply", () => {
+  const msg: OscMessage = {
+    address: "/$ctl/OSC/ronly",
+    args: [
+      { type: "s", value: "1" },
+      { type: "f", value: 1 },
+      { type: "i", value: 1 },
+    ],
+  };
+  assert.equal(oscIntFlag(msg, "/$ctl/OSC/ronly"), 1);
+});
+
+test("assertOscWritable rejects when console OSC is locked", async () => {
+  const osc = {
+    async get() {
+      return {
+        address: "/$ctl/OSC/ronly",
+        args: [
+          { type: "s", value: "1" },
+          { type: "f", value: 1 },
+          { type: "i", value: 1 },
+        ],
+      } satisfies OscMessage;
+    },
+  } as unknown as OscClient;
+
+  await assert.rejects(() => new Wing(osc).assertOscWritable(), (err: Error) => {
+    assert.match(err.message, /Remote Lock is ON/);
+    assert.equal(err.message, OSC_RONLY_ERROR);
+    return true;
+  });
+});
+
+test("assertOscWritable allows writes when ronly is clear", async () => {
+  const osc = {
+    async get() {
+      return {
+        address: "/$ctl/OSC/ronly",
+        args: [
+          { type: "s", value: "0" },
+          { type: "f", value: 0 },
+          { type: "i", value: 0 },
+        ],
+      } satisfies OscMessage;
+    },
+  } as unknown as OscClient;
+
+  await new Wing(osc).assertOscWritable();
+});
+
+test("formats fader and mute for operators", () => {
+  assert.equal(formatFaderDb(-144), "-oo dB");
+  assert.equal(formatFaderDb(-7.646), "-7.6 dB");
+  assert.equal(formatMuteState(true), "muted");
+  assert.equal(formatMuteState(false), "unmuted");
+});
+
+test("reads dB from a WING sff fader reply", () => {
+  const msg: OscMessage = {
+    address: "/ch/17/fdr",
+    args: [
+      { type: "s", value: "-7.6" },
+      { type: "f", value: 0.56 },
+      { type: "f", value: -7.646 },
+    ],
+  };
+  assert.equal(faderDbFromReply(msg, "/ch/17/fdr"), -7.646);
+});
+
+test("setMute rejects when the console ignores the write", async () => {
+  const reply: OscMessage = {
+    address: "/ch/1/mute",
+    args: [
+      { type: "s", value: "0" },
+      { type: "f", value: 0 },
+      { type: "i", value: 0 },
+    ],
+  };
+  const osc = {
+    async setAndConfirm() {
+      return reply;
+    },
+  } as unknown as OscClient;
+
+  await assert.rejects(() => new Wing(osc).setMute("ch", 1, true), (err: Error) => {
+    assert.equal(err.message, WRITE_DID_NOT_STICK_HINT);
+    return true;
+  });
 });
