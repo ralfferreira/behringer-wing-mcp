@@ -198,3 +198,20 @@ test("setMute rejects when the console ignores the write", async () => {
     return true;
   });
 });
+
+test("DCA name reads skip /$name to avoid OSC timeouts", async () => {
+  const requested: string[] = [];
+  const osc = {
+    async get(address: string) {
+      requested.push(address);
+      return {
+        address,
+        args: [{ type: "s", value: "DCA BASS" }],
+      } satisfies OscMessage;
+    },
+  } as unknown as OscClient;
+
+  const names = await new Wing(osc).readStripNames("dca", 2);
+  assert.equal(names.name, "DCA BASS");
+  assert.deepEqual(requested, ["/dca/2/name"]);
+});
