@@ -155,6 +155,78 @@ export function busSendAddress(sourceKind: BusSendSourceKind, sourceIndex: numbe
   return stripAddress(sourceKind, sourceIndex, `send/${busIndex}/${leaf}`);
 }
 
+export function assertFxSlot(slot: number): void {
+  if (!Number.isInteger(slot) || slot < 1 || slot > 16) {
+    throw new Error(`FX slot must be 1-16, got ${slot}`);
+  }
+}
+
+export function fxAddress(slot: number, leaf: string): string {
+  assertFxSlot(slot);
+  return `/fx/${slot}/${leaf.replace(/^\//, "")}`;
+}
+
+export type InsertPosition = "pre" | "post";
+
+const INSERT_KINDS = new Set<StripKind>(["ch", "aux", "bus", "main", "mtx"]);
+const POST_INSERT_KINDS = new Set<StripKind>(["ch", "bus", "main", "mtx"]);
+
+/** Models that require premium FX slots 1-8 (external memory). */
+const PREMIUM_FX_MDLS = new Set([
+  "HALL",
+  "ROOM",
+  "CHAMBER",
+  "PLATE",
+  "CONCERT",
+  "AMBI",
+  "V-ROOM",
+  "V-REV",
+  "V-PLATE",
+  "GATED",
+  "REVERSE",
+  "DEL/REV",
+  "SHIMMER",
+  "SPRING",
+  "DIMCRS",
+  "CHORUS",
+  "FLANGER",
+  "ST-DL",
+  "TAP-DL",
+  "TAPE-DL",
+  "OILCAN",
+  "BBD-DL",
+  "PITCH",
+  "D-PITCH",
+  "VSS3",
+  "BPLATE",
+]);
+
+export function assertFxModelForSlot(slot: number, mdl: string): void {
+  assertFxSlot(slot);
+  const normalized = mdl.trim().toUpperCase();
+  if (slot >= 9 && PREMIUM_FX_MDLS.has(normalized)) {
+    throw new Error(`FX model ${normalized} requires a premium slot 1-8, got slot ${slot}`);
+  }
+}
+
+export function insertAddress(kind: StripKind, index: number, position: InsertPosition, leaf: string): string {
+  if (!INSERT_KINDS.has(kind)) {
+    throw new Error(`insert is not available on ${kind}`);
+  }
+  if (position === "post" && !POST_INSERT_KINDS.has(kind)) {
+    throw new Error(`post insert is not available on ${kind}`);
+  }
+  assertStripIndex(kind, index);
+  const node = position === "pre" ? "preins" : "postins";
+  return stripAddress(kind, index, `${node}/${leaf}`);
+}
+
+export function formatFxIns(slot: number | "NONE" | null | undefined): string {
+  if (slot === undefined || slot === null || slot === "NONE") return "NONE";
+  assertFxSlot(slot);
+  return `FX${slot}`;
+}
+
 export function clampDb(db: number): number {
   if (!Number.isFinite(db)) {
     throw new Error(`dB value must be finite, got ${db}`);
@@ -670,6 +742,79 @@ export class Wing {
       out.tilt = await this.writeFloat(kind, index, "flt/tilt", clampRange(opts.tilt_db, -6, 6, "flt tilt"));
     }
     if (Object.keys(out).length === 0) throw new Error("set_flt requires at least one parameter");
+    return out;
+  }
+
+  async getFxStatus(slot: number): Promise<Record<string, unknown>> {
+    assertFxSlot(slot);
+    const out: Record<string, unknown> = {
+      slot,
+      mdl: argSummary(await this.osc.get(fxAddress(slot, "mdl"))),
+      fxmix: faderDbFromReply(await this.osc.get(fxAddress(slot, "fxmix")), fxAddress(slot, "fxmix")),
+    };
+    for (const leaf of ["$esrc", "$emode", "$a_chn", "$a_pos"] as const) {
+      try {
+        out[leaf] = argSummary(await this.osc.get(fxAddress(slot, leaf)));
+      } catch (err) {
+        out[leaf] = `error: ${(err as Error).message}`;
+      }
+    }
+    return out;
+  }
+
+  async setFx(
+    slot: number,
+    opts: { mdl?: string; fxmix?: number; param_index?: number; param_value?: number | string }
+  ): Promise<Record<string, string>> {
+    assertFxSlot(slot);
+    const out: Record<string, string> = {};
+    if (opts.mdl !== undefined) {
+      assertFxModelForSlot(slot, opts.mdl);
+      const msg = await this.osc.setAndConfirm(fxAddress(slot, "mdl"), opts.mdl, "s");
+      out.mdl = argSummary(msg);
+    }
+    if (opts.fxmix !== undefined) {
+      const mix = clampRange(opts.fxmix, 0, 100, "fxmix");
+      const msg = await this.osc.setAndConfirm(fxAddress(slot, "fxmix"), mix, "f");
+      out.fxmix = argSummary(msg);
+    }
+    if (opts.param_index !== undefined) {
+      if (!Number.isInteger(opts.param_index) || opts.param_index < 1 || opts.param_index > 40) {
+        throw new Error(`FX param_index must be 1-40, got ${opts.param_index}`);
+      }
+      if (opts.param_value === undefined) {
+        throw new Error("set_fx param_index requires param_value");
+      }
+      const leaf = String(opts.param_index);
+      const force = typeof opts.param_value === "string" ? "s" : Number.isInteger(opts.param_value) ? "i" : "f";
+      const msg = await this.osc.setAndConfirm(fxAddress(slot, leaf), opts.param_value, force);
+      out[`p${opts.param_index}`] = argSummary(msg);
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_fx requires mdl, fxmix, or param_index");
+    return out;
+  }
+
+  async setInsert(
+    kind: StripKind,
+    index: number,
+    position: InsertPosition,
+    opts: { on?: boolean; fx_slot?: number | "NONE" }
+  ): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    if (opts.on !== undefined) {
+      const address = insertAddress(kind, index, position, "on");
+      const target = opts.on ? 1 : 0;
+      const msg = await this.osc.setAndConfirm(address, target, "i");
+      assertWriteStuck(oscIntFlag(msg, address) === target);
+      out.on = argSummary(msg);
+    }
+    if (opts.fx_slot !== undefined) {
+      const ins = formatFxIns(opts.fx_slot);
+      const address = insertAddress(kind, index, position, "ins");
+      const msg = await this.osc.setAndConfirm(address, ins, "s");
+      out.ins = argSummary(msg);
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_insert requires on and/or fx_slot");
     return out;
   }
 }

@@ -21,6 +21,7 @@ operations:
 - set bus send level from typed source/destination fields
 - read a small strip status snapshot
 - read and write channel EQ, gate, compressor, and filter for default plugin models
+- read FX rack status and set mdl/mix/numbered params; assign strip inserts
 - read or write a raw OSC address as an escape hatch
 
 Typed EQ band, gate threshold, compressor, and TILT writes target the console
@@ -160,6 +161,9 @@ Windows example path:
 | `set_gate` | Set gate on or GATE thr/envelope. Find first when named. |
 | `set_dyn` | Set dyn on or COMP/EXP params. Find first when named. |
 | `set_flt` | Set channel HPF/LPF/TILT. Find first when named. |
+| `get_fx_status` | Read FX rack slot model, mix, and assignment. |
+| `set_fx` | Set FX mdl, fxmix, or numbered param 1-40. |
+| `set_insert` | Assign strip pre/post insert to FX1-FX16 or NONE. |
 | `osc_get` | Read any raw OSC address. |
 | `osc_set` | Write any raw OSC address, then read it back. |
 
