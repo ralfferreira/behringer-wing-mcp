@@ -20,7 +20,12 @@ operations:
 - find/list strips by scribble-strip name
 - set bus send level from typed source/destination fields
 - read a small strip status snapshot
+- read and write channel EQ, gate, compressor, and filter for default plugin models
 - read or write a raw OSC address as an escape hatch
+
+Typed EQ band, gate threshold, compressor, and TILT writes target the console
+default models (`STD`, `GATE`, `COMP`/`EXP`, `TILT`). Other plugin models stay on
+`osc_get` / `osc_set`.
 
 The code can be built and tested without a console. Actual OSC calls require a
 WING on the same network.
@@ -147,6 +152,14 @@ Windows example path:
 | `find_strip_by_name` | Find strips by surface name (and stored name). Required before named writes. |
 | `list_strips` | List strip IDs with surface names, optionally with status. Overview only. |
 | `set_bus_send` | Set a channel, aux, or bus send level to a bus destination. |
+| `get_eq_status` | Read EQ on/off, model, mix, and STD bands. |
+| `get_gate_status` | Read gate on/off and GATE envelope (channels). |
+| `get_dyn_status` | Read compressor on/off and COMP/EXP params. |
+| `get_flt_status` | Read channel HPF/LPF and TILT. |
+| `set_eq` | Set EQ on/mix or one STD band. Find first when named. |
+| `set_gate` | Set gate on or GATE thr/envelope. Find first when named. |
+| `set_dyn` | Set dyn on or COMP/EXP params. Find first when named. |
+| `set_flt` | Set channel HPF/LPF/TILT. Find first when named. |
 | `osc_get` | Read any raw OSC address. |
 | `osc_set` | Write any raw OSC address, then read it back. |
 

@@ -4,6 +4,10 @@ import type { OscClient, OscMessage } from "./osc.js";
 import {
   busSendAddress,
   clampDb,
+  DEFAULT_MDL,
+  eqBandLeaf,
+  assertProcKind,
+  nonDefaultMdlError,
   faderDbFromReply,
   findStripNameMatches,
   formatFaderDb,
@@ -214,4 +218,56 @@ test("DCA name reads skip /$name to avoid OSC timeouts", async () => {
   const names = await new Wing(osc).readStripNames("dca", 2);
   assert.equal(names.name, "DCA BASS");
   assert.deepEqual(requested, ["/dca/2/name"]);
+});
+
+test("EQ band leaf map covers STD gain/freq/Q", () => {
+  assert.equal(eqBandLeaf("1", "gain"), "1g");
+  assert.equal(eqBandLeaf("low", "freq"), "lf");
+  assert.equal(eqBandLeaf("high", "type"), "heq");
+  assert.throws(() => eqBandLeaf("1", "type"), /no type leaf/);
+});
+
+test("processing kind guards match WING strip ownership", () => {
+  assert.doesNotThrow(() => assertProcKind("eq", "bus"));
+  assert.doesNotThrow(() => assertProcKind("gate", "ch"));
+  assert.throws(() => assertProcKind("gate", "bus"), /gate is not available on bus/);
+  assert.throws(() => assertProcKind("flt", "aux"), /flt is not available on aux/);
+});
+
+test("non-default mdl errors point at osc_get/osc_set", () => {
+  const err = nonDefaultMdlError("eq", "SOUL", DEFAULT_MDL.eq);
+  assert.match(err.message, /SOUL/);
+  assert.match(err.message, /osc_get\/osc_set/);
+});
+
+test("setEq rejects band writes when mdl is not STD", async () => {
+  const osc = {
+    async get(address: string) {
+      if (address.endsWith("/eq/mdl")) {
+        return { address, args: [{ type: "s", value: "SOUL" }] } satisfies OscMessage;
+      }
+      return { address, args: [{ type: "i", value: 1 }] } satisfies OscMessage;
+    },
+    async setAndConfirm() {
+      throw new Error("should not write");
+    },
+  } as unknown as OscClient;
+
+  await assert.rejects(() => new Wing(osc).setEq("ch", 1, { band: "1", gain_db: -3 }), /SOUL/);
+});
+
+test("setGate rejects thr writes when mdl is not GATE", async () => {
+  const osc = {
+    async get(address: string) {
+      if (address.endsWith("/gate/mdl")) {
+        return { address, args: [{ type: "s", value: "WAVE" }] } satisfies OscMessage;
+      }
+      return { address, args: [{ type: "i", value: 1 }] } satisfies OscMessage;
+    },
+    async setAndConfirm() {
+      throw new Error("should not write");
+    },
+  } as unknown as OscClient;
+
+  await assert.rejects(() => new Wing(osc).setGate("ch", 1, { thr_db: -40 }), /WAVE/);
 });

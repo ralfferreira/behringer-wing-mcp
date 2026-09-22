@@ -26,6 +26,8 @@ import { OscClient, OscMessage } from "./osc.js";
 
 export type StripKind = "ch" | "aux" | "bus" | "main" | "mtx" | "dca";
 export type BusSendSourceKind = "ch" | "aux" | "bus";
+export type ProcBlock = "eq" | "gate" | "dyn" | "flt";
+export type EqBand = "low" | "1" | "2" | "3" | "4" | "high";
 
 export const STRIP_KINDS: StripKind[] = ["ch", "aux", "bus", "main", "mtx", "dca"];
 
@@ -37,6 +39,58 @@ const STRIP_LIMITS: Record<StripKind, number> = {
   mtx: 8,
   dca: 16,
 };
+
+/** Default plugin models whose italic OSC leaves the typed tools understand. */
+export const DEFAULT_MDL = {
+  eq: "STD",
+  gate: "GATE",
+  dyn: "COMP",
+  flt: "TILT",
+} as const;
+
+const PROC_KINDS: Record<ProcBlock, ReadonlySet<StripKind>> = {
+  eq: new Set(["ch", "aux", "bus", "main", "mtx"]),
+  gate: new Set(["ch"]),
+  dyn: new Set(["ch", "aux", "bus", "main", "mtx"]),
+  flt: new Set(["ch"]),
+};
+
+const EQ_BAND_LEAVES: Record<EqBand, { gain: string; freq: string; q: string; type?: string }> = {
+  low: { gain: "lg", freq: "lf", q: "lq", type: "leq" },
+  "1": { gain: "1g", freq: "1f", q: "1q" },
+  "2": { gain: "2g", freq: "2f", q: "2q" },
+  "3": { gain: "3g", freq: "3f", q: "3q" },
+  "4": { gain: "4g", freq: "4f", q: "4q" },
+  high: { gain: "hg", freq: "hf", q: "hq", type: "heq" },
+};
+
+const DYN_PARAM_MDLS = new Set(["COMP", "EXP"]);
+
+export function eqBandLeaf(band: EqBand, leaf: "gain" | "freq" | "q" | "type"): string {
+  const map = EQ_BAND_LEAVES[band];
+  if (leaf === "type") {
+    if (!map.type) throw new Error(`EQ band ${band} has no type leaf`);
+    return map.type;
+  }
+  return map[leaf];
+}
+
+export function assertProcKind(block: ProcBlock, kind: StripKind): void {
+  if (!PROC_KINDS[block].has(kind)) {
+    throw new Error(`${block} is not available on ${kind}; supported kinds: ${[...PROC_KINDS[block]].join(", ")}`);
+  }
+}
+
+export function nonDefaultMdlError(block: ProcBlock, mdl: string, expected: string): Error {
+  return new Error(
+    `${block} model is ${mdl}, not ${expected}. Typed ${block} parameter writes target the default model only. Use osc_get/osc_set for this plugin.`
+  );
+}
+
+function clampRange(value: number, min: number, max: number, label: string): number {
+  if (!Number.isFinite(value)) throw new Error(`${label} must be finite, got ${value}`);
+  return Math.max(min, Math.min(max, value));
+}
 
 /** Leaves that exist on every typed strip kind used by list/status helpers. */
 const STATUS_LEAVES: Record<StripKind, ReadonlyArray<"fdr" | "mute" | "pan">> = {
@@ -359,6 +413,263 @@ export class Wing {
         out[leaf] = `error: ${(err as Error).message}`;
       }
     }
+    return out;
+  }
+
+  private async readLeaf(kind: StripKind, index: number, leaf: string): Promise<string> {
+    return argSummary(await this.osc.get(stripAddress(kind, index, leaf)));
+  }
+
+  private async readFloatLeaf(kind: StripKind, index: number, leaf: string): Promise<number> {
+    const address = stripAddress(kind, index, leaf);
+    return faderDbFromReply(await this.osc.get(address), address);
+  }
+
+  private async readMdl(kind: StripKind, index: number, block: ProcBlock): Promise<string> {
+    return (await this.readLeaf(kind, index, `${block}/mdl`)).trim();
+  }
+
+  private async writeIntFlag(kind: StripKind, index: number, leaf: string, on: boolean): Promise<string> {
+    const address = stripAddress(kind, index, leaf);
+    const target = on ? 1 : 0;
+    const msg = await this.osc.setAndConfirm(address, target, "i");
+    assertWriteStuck(oscIntFlag(msg, address) === target);
+    return argSummary(msg);
+  }
+
+  private async writeFloat(kind: StripKind, index: number, leaf: string, value: number): Promise<string> {
+    const address = stripAddress(kind, index, leaf);
+    const msg = await this.osc.setAndConfirm(address, value, "f");
+    return argSummary(msg);
+  }
+
+  private async writeString(kind: StripKind, index: number, leaf: string, value: string): Promise<string> {
+    const address = stripAddress(kind, index, leaf);
+    const msg = await this.osc.setAndConfirm(address, value, "s");
+    return argSummary(msg);
+  }
+
+  async getEqStatus(kind: StripKind, index: number): Promise<Record<string, unknown>> {
+    assertProcKind("eq", kind);
+    assertStripIndex(kind, index);
+    const mdl = await this.readMdl(kind, index, "eq");
+    const out: Record<string, unknown> = {
+      on: oscIntFlag(await this.osc.get(stripAddress(kind, index, "eq/on")), stripAddress(kind, index, "eq/on")),
+      mdl,
+      mix: await this.readFloatLeaf(kind, index, "eq/mix"),
+    };
+    if (mdl !== DEFAULT_MDL.eq) {
+      out.note = `non-STD model; band details omitted. Use osc_get for ${mdl} leaves.`;
+      return out;
+    }
+    const bands: Record<string, Record<string, string | number>> = {};
+    for (const band of Object.keys(EQ_BAND_LEAVES) as EqBand[]) {
+      const leaves = EQ_BAND_LEAVES[band];
+      bands[band] = {
+        gain_db: await this.readFloatLeaf(kind, index, `eq/${leaves.gain}`),
+        freq_hz: await this.readFloatLeaf(kind, index, `eq/${leaves.freq}`),
+        q: await this.readFloatLeaf(kind, index, `eq/${leaves.q}`),
+      };
+      if (leaves.type) {
+        bands[band].type = await this.readLeaf(kind, index, `eq/${leaves.type}`);
+      }
+    }
+    out.bands = bands;
+    return out;
+  }
+
+  async getGateStatus(kind: StripKind, index: number): Promise<Record<string, unknown>> {
+    assertProcKind("gate", kind);
+    assertStripIndex(kind, index);
+    const mdl = await this.readMdl(kind, index, "gate");
+    const out: Record<string, unknown> = {
+      on: oscIntFlag(await this.osc.get(stripAddress(kind, index, "gate/on")), stripAddress(kind, index, "gate/on")),
+      mdl,
+    };
+    if (mdl !== DEFAULT_MDL.gate) {
+      out.note = `non-GATE model; use osc_get for ${mdl} leaves.`;
+      return out;
+    }
+    out.thr_db = await this.readFloatLeaf(kind, index, "gate/thr");
+    out.range_db = await this.readFloatLeaf(kind, index, "gate/range");
+    out.att_ms = await this.readFloatLeaf(kind, index, "gate/att");
+    out.hld_ms = await this.readFloatLeaf(kind, index, "gate/hld");
+    out.rel_ms = await this.readFloatLeaf(kind, index, "gate/rel");
+    out.acc = await this.readFloatLeaf(kind, index, "gate/acc");
+    out.ratio = await this.readLeaf(kind, index, "gate/ratio");
+    return out;
+  }
+
+  async getDynStatus(kind: StripKind, index: number): Promise<Record<string, unknown>> {
+    assertProcKind("dyn", kind);
+    assertStripIndex(kind, index);
+    const onAddr = stripAddress(kind, index, "dyn/on");
+    const out: Record<string, unknown> = {
+      on: oscIntFlag(await this.osc.get(onAddr), onAddr),
+    };
+    let mdl = "";
+    try {
+      mdl = await this.readMdl(kind, index, "dyn");
+      out.mdl = mdl;
+    } catch (err) {
+      out.mdl_error = (err as Error).message;
+    }
+    if (mdl && !DYN_PARAM_MDLS.has(mdl) && mdl !== DEFAULT_MDL.dyn) {
+      out.note = `non-COMP/EXP model; use osc_get for ${mdl} leaves.`;
+      return out;
+    }
+    try {
+      out.thr_db = await this.readFloatLeaf(kind, index, "dyn/thr");
+      out.ratio = await this.readLeaf(kind, index, "dyn/ratio");
+      out.gain_db = await this.readFloatLeaf(kind, index, "dyn/gain");
+      out.mix = await this.readFloatLeaf(kind, index, "dyn/mix");
+      out.auto = oscIntFlag(await this.osc.get(stripAddress(kind, index, "dyn/auto")), stripAddress(kind, index, "dyn/auto"));
+    } catch (err) {
+      out.params_error = (err as Error).message;
+    }
+    return out;
+  }
+
+  async getFltStatus(kind: StripKind, index: number): Promise<Record<string, unknown>> {
+    assertProcKind("flt", kind);
+    assertStripIndex(kind, index);
+    const mdl = await this.readMdl(kind, index, "flt");
+    const out: Record<string, unknown> = {
+      mdl,
+      lc: oscIntFlag(await this.osc.get(stripAddress(kind, index, "flt/lc")), stripAddress(kind, index, "flt/lc")),
+      lcf_hz: await this.readFloatLeaf(kind, index, "flt/lcf"),
+      hc: oscIntFlag(await this.osc.get(stripAddress(kind, index, "flt/hc")), stripAddress(kind, index, "flt/hc")),
+      hcf_hz: await this.readFloatLeaf(kind, index, "flt/hcf"),
+      tf: oscIntFlag(await this.osc.get(stripAddress(kind, index, "flt/tf")), stripAddress(kind, index, "flt/tf")),
+    };
+    if (mdl === DEFAULT_MDL.flt) {
+      out.tilt_db = await this.readFloatLeaf(kind, index, "flt/tilt");
+    } else {
+      out.note = `non-TILT model; use osc_get for ${mdl} tool leaves.`;
+    }
+    return out;
+  }
+
+  async setEq(
+    kind: StripKind,
+    index: number,
+    opts: { on?: boolean; mix?: number; band?: EqBand; gain_db?: number; freq_hz?: number; q?: number }
+  ): Promise<Record<string, string>> {
+    assertProcKind("eq", kind);
+    assertStripIndex(kind, index);
+    const out: Record<string, string> = {};
+    if (opts.on !== undefined) out.on = await this.writeIntFlag(kind, index, "eq/on", opts.on);
+    if (opts.mix !== undefined) {
+      out.mix = await this.writeFloat(kind, index, "eq/mix", clampRange(opts.mix, 0, 125, "eq mix"));
+    }
+    const needsBand = opts.band !== undefined || opts.gain_db !== undefined || opts.freq_hz !== undefined || opts.q !== undefined;
+    if (needsBand) {
+      if (opts.band === undefined) throw new Error("set_eq band writes require band (low|1|2|3|4|high)");
+      const mdl = await this.readMdl(kind, index, "eq");
+      if (mdl !== DEFAULT_MDL.eq) throw nonDefaultMdlError("eq", mdl, DEFAULT_MDL.eq);
+      const leaves = EQ_BAND_LEAVES[opts.band];
+      if (opts.gain_db !== undefined) {
+        out.gain = await this.writeFloat(kind, index, `eq/${leaves.gain}`, clampRange(opts.gain_db, -15, 15, "eq gain"));
+      }
+      if (opts.freq_hz !== undefined) {
+        const min = opts.band === "low" ? 20 : opts.band === "high" ? 50 : 20;
+        const max = opts.band === "low" ? 2000 : 20000;
+        out.freq = await this.writeFloat(kind, index, `eq/${leaves.freq}`, clampRange(opts.freq_hz, min, max, "eq freq"));
+      }
+      if (opts.q !== undefined) {
+        out.q = await this.writeFloat(kind, index, `eq/${leaves.q}`, clampRange(opts.q, 0.44, 10, "eq q"));
+      }
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_eq requires at least one of on, mix, or band parameters");
+    return out;
+  }
+
+  async setGate(
+    kind: StripKind,
+    index: number,
+    opts: { on?: boolean; thr_db?: number; range_db?: number; att_ms?: number; hld_ms?: number; rel_ms?: number }
+  ): Promise<Record<string, string>> {
+    assertProcKind("gate", kind);
+    assertStripIndex(kind, index);
+    const out: Record<string, string> = {};
+    if (opts.on !== undefined) out.on = await this.writeIntFlag(kind, index, "gate/on", opts.on);
+    const needsParams =
+      opts.thr_db !== undefined || opts.range_db !== undefined || opts.att_ms !== undefined || opts.hld_ms !== undefined || opts.rel_ms !== undefined;
+    if (needsParams) {
+      const mdl = await this.readMdl(kind, index, "gate");
+      if (mdl !== DEFAULT_MDL.gate) throw nonDefaultMdlError("gate", mdl, DEFAULT_MDL.gate);
+      if (opts.thr_db !== undefined) {
+        out.thr = await this.writeFloat(kind, index, "gate/thr", clampRange(opts.thr_db, -80, 0, "gate thr"));
+      }
+      if (opts.range_db !== undefined) {
+        out.range = await this.writeFloat(kind, index, "gate/range", clampRange(opts.range_db, 3, 60, "gate range"));
+      }
+      if (opts.att_ms !== undefined) {
+        out.att = await this.writeFloat(kind, index, "gate/att", clampRange(opts.att_ms, 0, 120, "gate att"));
+      }
+      if (opts.hld_ms !== undefined) {
+        out.hld = await this.writeFloat(kind, index, "gate/hld", clampRange(opts.hld_ms, 0, 200, "gate hld"));
+      }
+      if (opts.rel_ms !== undefined) {
+        out.rel = await this.writeFloat(kind, index, "gate/rel", clampRange(opts.rel_ms, 4, 4000, "gate rel"));
+      }
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_gate requires at least one parameter");
+    return out;
+  }
+
+  async setDyn(
+    kind: StripKind,
+    index: number,
+    opts: { on?: boolean; thr_db?: number; ratio?: string; gain_db?: number; mix?: number; auto?: boolean }
+  ): Promise<Record<string, string>> {
+    assertProcKind("dyn", kind);
+    assertStripIndex(kind, index);
+    const out: Record<string, string> = {};
+    if (opts.on !== undefined) out.on = await this.writeIntFlag(kind, index, "dyn/on", opts.on);
+    const needsParams =
+      opts.thr_db !== undefined || opts.ratio !== undefined || opts.gain_db !== undefined || opts.mix !== undefined || opts.auto !== undefined;
+    if (needsParams) {
+      const mdl = await this.readMdl(kind, index, "dyn");
+      if (!DYN_PARAM_MDLS.has(mdl)) throw nonDefaultMdlError("dyn", mdl, "COMP or EXP");
+      if (opts.thr_db !== undefined) {
+        out.thr = await this.writeFloat(kind, index, "dyn/thr", clampRange(opts.thr_db, -60, 0, "dyn thr"));
+      }
+      if (opts.ratio !== undefined) out.ratio = await this.writeString(kind, index, "dyn/ratio", opts.ratio);
+      if (opts.gain_db !== undefined) {
+        out.gain = await this.writeFloat(kind, index, "dyn/gain", clampRange(opts.gain_db, -6, 12, "dyn gain"));
+      }
+      if (opts.mix !== undefined) {
+        out.mix = await this.writeFloat(kind, index, "dyn/mix", clampRange(opts.mix, 0, 100, "dyn mix"));
+      }
+      if (opts.auto !== undefined) out.auto = await this.writeIntFlag(kind, index, "dyn/auto", opts.auto);
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_dyn requires at least one parameter");
+    return out;
+  }
+
+  async setFlt(
+    kind: StripKind,
+    index: number,
+    opts: { lc?: boolean; lcf_hz?: number; hc?: boolean; hcf_hz?: number; tilt_db?: number }
+  ): Promise<Record<string, string>> {
+    assertProcKind("flt", kind);
+    assertStripIndex(kind, index);
+    const out: Record<string, string> = {};
+    if (opts.lc !== undefined) out.lc = await this.writeIntFlag(kind, index, "flt/lc", opts.lc);
+    if (opts.lcf_hz !== undefined) {
+      out.lcf = await this.writeFloat(kind, index, "flt/lcf", clampRange(opts.lcf_hz, 20, 2000, "flt lcf"));
+    }
+    if (opts.hc !== undefined) out.hc = await this.writeIntFlag(kind, index, "flt/hc", opts.hc);
+    if (opts.hcf_hz !== undefined) {
+      out.hcf = await this.writeFloat(kind, index, "flt/hcf", clampRange(opts.hcf_hz, 50, 20000, "flt hcf"));
+    }
+    if (opts.tilt_db !== undefined) {
+      const mdl = await this.readMdl(kind, index, "flt");
+      if (mdl !== DEFAULT_MDL.flt) throw nonDefaultMdlError("flt", mdl, DEFAULT_MDL.flt);
+      out.tilt = await this.writeFloat(kind, index, "flt/tilt", clampRange(opts.tilt_db, -6, 6, "flt tilt"));
+    }
+    if (Object.keys(out).length === 0) throw new Error("set_flt requires at least one parameter");
     return out;
   }
 }

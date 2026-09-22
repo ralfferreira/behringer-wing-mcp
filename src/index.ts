@@ -17,7 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { OscClient } from "./osc.js";
 import { Wing, argSummary } from "./wing.js";
-import type { BusSendSourceKind, StripKind } from "./wing.js";
+import type { BusSendSourceKind, EqBand, StripKind } from "./wing.js";
 
 const VERSION = "0.1.0";
 
@@ -237,6 +237,166 @@ server.tool(
       const result = await wing.setBusSend(source_kind as BusSendSourceKind, source_index, bus, db, enabled);
       const enabledText = result.enabled === undefined ? "" : `, enabled -> ${result.enabled}`;
       return { content: [{ type: "text", text: `${source_kind}/${source_index} send to bus/${bus} level -> ${result.level} dB${enabledText}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+const eqBand = z.enum(["low", "1", "2", "3", "4", "high"]);
+
+server.tool(
+  "get_eq_status",
+  "Read EQ on/off, model, mix, and STD band gain/freq/Q. Non-STD models return mdl only and point at osc_get.",
+  { kind: stripKind, index: z.number().int().min(1) },
+  async ({ kind, index }) => {
+    try {
+      const status = await wing.getEqStatus(kind as StripKind, index);
+      return { content: [{ type: "text", text: `${kind}/${index} eq: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "get_gate_status",
+  "Read gate on/off and GATE-model threshold/envelope. Channels only. Non-GATE models return mdl and point at osc_get.",
+  { kind: stripKind, index: z.number().int().min(1) },
+  async ({ kind, index }) => {
+    try {
+      const status = await wing.getGateStatus(kind as StripKind, index);
+      return { content: [{ type: "text", text: `${kind}/${index} gate: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "get_dyn_status",
+  "Read compressor on/off and COMP/EXP threshold/ratio/gain/mix/auto when available.",
+  { kind: stripKind, index: z.number().int().min(1) },
+  async ({ kind, index }) => {
+    try {
+      const status = await wing.getDynStatus(kind as StripKind, index);
+      return { content: [{ type: "text", text: `${kind}/${index} dyn: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "get_flt_status",
+  "Read channel filter HPF/LPF switches and frequencies, plus TILT level when mdl is TILT. Channels only.",
+  { kind: stripKind, index: z.number().int().min(1) },
+  async ({ kind, index }) => {
+    try {
+      const status = await wing.getFltStatus(kind as StripKind, index);
+      return { content: [{ type: "text", text: `${kind}/${index} flt: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_eq",
+  `Set EQ on/off, mix, or one STD band (gain/freq/Q). Band writes require mdl STD. ${WRITE_AFTER_FIND}`,
+  {
+    kind: stripKind,
+    index: z.number().int().min(1),
+    on: z.boolean().optional(),
+    mix: z.number().optional(),
+    band: eqBand.optional(),
+    gain_db: z.number().optional(),
+    freq_hz: z.number().optional(),
+    q: z.number().optional(),
+  },
+  async ({ kind, index, on, mix, band, gain_db, freq_hz, q }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setEq(kind as StripKind, index, {
+        on,
+        mix,
+        band: band as EqBand | undefined,
+        gain_db,
+        freq_hz,
+        q,
+      });
+      return { content: [{ type: "text", text: `${kind}/${index} eq -> ${JSON.stringify(result)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_gate",
+  `Set gate on/off or GATE-model thr/range/att/hld/rel. Channels only. ${WRITE_AFTER_FIND}`,
+  {
+    kind: stripKind,
+    index: z.number().int().min(1),
+    on: z.boolean().optional(),
+    thr_db: z.number().optional(),
+    range_db: z.number().optional(),
+    att_ms: z.number().optional(),
+    hld_ms: z.number().optional(),
+    rel_ms: z.number().optional(),
+  },
+  async ({ kind, index, on, thr_db, range_db, att_ms, hld_ms, rel_ms }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setGate(kind as StripKind, index, { on, thr_db, range_db, att_ms, hld_ms, rel_ms });
+      return { content: [{ type: "text", text: `${kind}/${index} gate -> ${JSON.stringify(result)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_dyn",
+  `Set compressor on/off or COMP/EXP thr/ratio/gain/mix/auto. ${WRITE_AFTER_FIND}`,
+  {
+    kind: stripKind,
+    index: z.number().int().min(1),
+    on: z.boolean().optional(),
+    thr_db: z.number().optional(),
+    ratio: z.string().optional(),
+    gain_db: z.number().optional(),
+    mix: z.number().optional(),
+    auto: z.boolean().optional(),
+  },
+  async ({ kind, index, on, thr_db, ratio, gain_db, mix, auto }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setDyn(kind as StripKind, index, { on, thr_db, ratio, gain_db, mix, auto });
+      return { content: [{ type: "text", text: `${kind}/${index} dyn -> ${JSON.stringify(result)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_flt",
+  `Set channel HPF/LPF and TILT. tilt_db requires mdl TILT. Channels only. ${WRITE_AFTER_FIND}`,
+  {
+    kind: stripKind,
+    index: z.number().int().min(1),
+    lc: z.boolean().optional(),
+    lcf_hz: z.number().optional(),
+    hc: z.boolean().optional(),
+    hcf_hz: z.number().optional(),
+    tilt_db: z.number().optional(),
+  },
+  async ({ kind, index, lc, lcf_hz, hc, hcf_hz, tilt_db }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setFlt(kind as StripKind, index, { lc, lcf_hz, hc, hcf_hz, tilt_db });
+      return { content: [{ type: "text", text: `${kind}/${index} flt -> ${JSON.stringify(result)}` }] };
     } catch (err) {
       return errText(err);
     }
