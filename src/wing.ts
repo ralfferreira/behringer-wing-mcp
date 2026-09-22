@@ -38,6 +38,20 @@ const STRIP_LIMITS: Record<StripKind, number> = {
   dca: 16,
 };
 
+/** Leaves that exist on every typed strip kind used by list/status helpers. */
+const STATUS_LEAVES: Record<StripKind, ReadonlyArray<"fdr" | "mute" | "pan">> = {
+  ch: ["fdr", "mute", "pan"],
+  aux: ["fdr", "mute", "pan"],
+  bus: ["fdr", "mute", "pan"],
+  main: ["fdr", "mute", "pan"],
+  mtx: ["fdr", "mute", "pan"],
+  // DCA has no pan node; asking for it waits the full OSC timeout.
+  dca: ["fdr", "mute"],
+};
+
+/** Strips that expose a surface display name at `/$name`. DCA does not. */
+const HAS_SURFACE_NAME = new Set<StripKind>(["ch", "aux", "bus", "main", "mtx"]);
+
 const BUS_SEND_SOURCE_KINDS = new Set<StripKind>(["ch", "aux", "bus"]);
 
 export interface StripRef {
@@ -237,11 +251,14 @@ export class Wing {
 
   async readStripNames(kind: StripKind, index: number): Promise<{ name: string; storedName?: string }> {
     const stored = argSummary(await this.osc.get(stripAddress(kind, index, "name")));
+    if (!HAS_SURFACE_NAME.has(kind)) {
+      return surfaceName(stored, "");
+    }
     let display = "";
     try {
       display = argSummary(await this.osc.get(stripAddress(kind, index, "$name")));
     } catch {
-      // Some strip kinds may not expose /$name; fall back to /name.
+      // Rare firmware gaps: fall back to /name.
     }
     return surfaceName(stored, display);
   }
@@ -312,9 +329,9 @@ export class Wing {
         summary.name = names.name;
         if (names.storedName) summary.storedName = names.storedName;
         if (includeStatus) {
-          summary.fader = argSummary(await this.osc.get(stripAddress(kind, index, "fdr")));
-          summary.mute = argSummary(await this.osc.get(stripAddress(kind, index, "mute")));
-          summary.pan = argSummary(await this.osc.get(stripAddress(kind, index, "pan")));
+          for (const leaf of STATUS_LEAVES[kind]) {
+            summary[leaf === "fdr" ? "fader" : leaf] = argSummary(await this.osc.get(stripAddress(kind, index, leaf)));
+          }
         }
       } catch (err) {
         summary.error = (err as Error).message;
@@ -330,7 +347,9 @@ export class Wing {
 
   /** Read a small status snapshot of one strip. */
   async stripStatus(kind: StripKind, index: number): Promise<Record<string, string>> {
-    const leaves = ["name", "$name", "fdr", "mute", "pan"];
+    const leaves = HAS_SURFACE_NAME.has(kind)
+      ? (["name", "$name", ...STATUS_LEAVES[kind]] as const)
+      : (["name", ...STATUS_LEAVES[kind]] as const);
     const out: Record<string, string> = {};
     for (const leaf of leaves) {
       try {
