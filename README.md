@@ -56,6 +56,39 @@ If someone says “the AI answered OK but the fader did not move,” check Remot
 Avoid exposing the console network to the public internet. The OSC control
 surface is intended for trusted local networks.
 
+## Surface names vs stored names
+
+The WING keeps two labels on many strips:
+
+- **Surface name** (`/$name`). What the operator sees on the desk scribble.
+- **Stored name** (`/name`). An internal label that can be different.
+
+Example from a live show: surface **VIOLAO** was stored as `SPDS L`, and surface
+**SPDS** was stored as `GUITARRA L`. If an assistant mutes “SPDS” using an old
+channel number from chat memory, it can hit the wrong instrument.
+
+`find_strip_by_name` and `list_strips` prefer the surface name and expose
+`storedName` when it differs.
+
+## How assistants should control the desk
+
+This server is meant for non-technical operators talking to an AI assistant.
+Assistants must follow this loop on every named change:
+
+1. Call `find_strip_by_name` with the words the operator used (VS, Caixa, SPDS, Violao, Guitar).
+2. Read `name`, `storedName`, `kind`, and `index` from that fresh result.
+3. If `ambiguous` is true, or several matches share the top score, ask which strip before writing.
+4. Only then call `set_mute`, `set_fader`, `adjust_fader`, `set_pan`, or `set_name`.
+
+Do **not**:
+
+- Reuse `ch/12` (or any index) remembered from earlier in the conversation
+- Assume the stored `/name` matches the scribble on the surface
+- Mute or move a fader from a stale `list_strips` snapshot without finding again
+
+Several independent writes in one turn (different strips) are fine. Do not fire
+two writes at the same strip address at once.
+
 ## Configure an MCP client
 
 Build the project first, then point your MCP client at `dist/index.js`.
@@ -105,14 +138,14 @@ Windows example path:
 
 | Tool | Description |
 | --- | --- |
-| `set_fader` | Set a strip fader level in dB. |
-| `adjust_fader` | Change a strip fader relatively by a dB delta. |
-| `set_mute` | Mute or unmute a strip. |
-| `set_pan` | Set strip pan from `-100` left to `100` right. |
-| `set_name` | Set a strip scribble-strip name. |
-| `get_strip_status` | Read name, fader, mute, and pan for one strip. |
-| `find_strip_by_name` | Find strips by the name on the mixer surface (and the stored name if different). |
-| `list_strips` | List strip IDs with surface names, optionally with status. |
+| `set_fader` | Set a strip fader level in dB. Find by surface name first when the operator names a strip. |
+| `adjust_fader` | Change a strip fader relatively by a dB delta. Find first when named. |
+| `set_mute` | Mute or unmute a strip. Find first when named. |
+| `set_pan` | Set strip pan from `-100` left to `100` right. Find first when named. |
+| `set_name` | Set a strip stored scribble `/name`. Find first when named. |
+| `get_strip_status` | Read surface name, stored name, fader, mute, and pan for one strip. |
+| `find_strip_by_name` | Find strips by surface name (and stored name). Required before named writes. |
+| `list_strips` | List strip IDs with surface names, optionally with status. Overview only. |
 | `set_bus_send` | Set a channel, aux, or bus send level to a bus destination. |
 | `osc_get` | Read any raw OSC address. |
 | `osc_set` | Write any raw OSC address, then read it back. |
@@ -134,19 +167,22 @@ These tools are meant to let MCP clients work from plain prompts without
 needing to know every OSC leaf.
 
 ```text
-adjust_fader kind="ch" index=12 delta_db=-3
-find_strip_by_name query="pastor mic"
+find_strip_by_name query="violao"
+set_mute kind="ch" index=11 muted=true
+adjust_fader kind="ch" index=15 delta_db=-3
 list_strips kinds=["ch","aux","bus"] include_status=false
 set_bus_send source_kind="ch" source_index=1 bus=5 db=-12 enabled=true
 ```
 
-`find_strip_by_name` returns ranked matches with `kind`, `index`, `id`, `name`,
-and `score`. If multiple matches have the same top score, prefer calling write
-tools with an explicit `kind` and `index`.
+Always run `find_strip_by_name` in the same turn as the write when the operator
+names a strip. The find result includes `kind`, `index`, `id`, `name` (surface),
+optional `storedName`, and `score`. If multiple matches have the same top score,
+ask which strip before writing.
 
 `list_strips` performs live request/response reads. By default it reads strip
 names only for a compact map of IDs to labels; set `include_status=true` to also
-read fader, mute, and pan values.
+read fader, mute, and pan values. Treat it as an overview, not as a substitute
+for a fresh find before a write.
 
 `set_bus_send` writes `/<source>/<index>/send/<bus>/lvl` and accepts source
 kinds `ch`, `aux`, and `bus`. When `enabled` is provided, it also writes the
