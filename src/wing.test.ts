@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { OscClient, OscMessage } from "./osc.js";
 import {
+  assertFxModelForSlot,
   busSendAddress,
   clampDb,
   DEFAULT_MDL,
   eqBandLeaf,
   assertProcKind,
+  formatFxIns,
+  fxAddress,
+  insertAddress,
   nonDefaultMdlError,
   faderDbFromReply,
   findStripNameMatches,
@@ -270,4 +274,21 @@ test("setGate rejects thr writes when mdl is not GATE", async () => {
   } as unknown as OscClient;
 
   await assert.rejects(() => new Wing(osc).setGate("ch", 1, { thr_db: -40 }), /WAVE/);
+});
+
+test("builds FX and insert addresses", () => {
+  assert.equal(fxAddress(1, "mdl"), "/fx/1/mdl");
+  assert.equal(fxAddress(16, "fxmix"), "/fx/16/fxmix");
+  assert.equal(insertAddress("ch", 3, "pre", "ins"), "/ch/3/preins/ins");
+  assert.equal(insertAddress("bus", 2, "post", "on"), "/bus/2/postins/on");
+  assert.throws(() => fxAddress(0, "mdl"), /FX slot must be 1-16/);
+  assert.throws(() => insertAddress("aux", 1, "post", "on"), /post insert is not available on aux/);
+  assert.equal(formatFxIns(4), "FX4");
+  assert.equal(formatFxIns("NONE"), "NONE");
+});
+
+test("rejects premium FX models on slots 9-16", () => {
+  assert.doesNotThrow(() => assertFxModelForSlot(1, "ST-DL"));
+  assert.throws(() => assertFxModelForSlot(9, "ST-DL"), /premium slot 1-8/);
+  assert.doesNotThrow(() => assertFxModelForSlot(9, "GEQ"));
 });

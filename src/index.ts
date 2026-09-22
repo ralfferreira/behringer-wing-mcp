@@ -17,7 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { OscClient } from "./osc.js";
 import { Wing, argSummary } from "./wing.js";
-import type { BusSendSourceKind, EqBand, StripKind } from "./wing.js";
+import type { BusSendSourceKind, EqBand, InsertPosition, StripKind } from "./wing.js";
 
 const VERSION = "0.1.0";
 
@@ -397,6 +397,62 @@ server.tool(
       await assertWritable();
       const result = await wing.setFlt(kind as StripKind, index, { lc, lcf_hz, hc, hcf_hz, tilt_db });
       return { content: [{ type: "text", text: `${kind}/${index} flt -> ${JSON.stringify(result)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "get_fx_status",
+  "Read FX rack slot mdl, fxmix, and read-only assignment leaves for slots 1-16.",
+  { slot: z.number().int().min(1).max(16) },
+  async ({ slot }) => {
+    try {
+      const status = await wing.getFxStatus(slot);
+      return { content: [{ type: "text", text: `fx/${slot}: ${JSON.stringify(status)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_fx",
+  "Set FX rack mdl, fxmix (0-100), or a numbered param 1-40. Premium time-based models require slots 1-8.",
+  {
+    slot: z.number().int().min(1).max(16),
+    mdl: z.string().optional(),
+    fxmix: z.number().optional(),
+    param_index: z.number().int().min(1).max(40).optional(),
+    param_value: z.union([z.number(), z.string()]).optional(),
+  },
+  async ({ slot, mdl, fxmix, param_index, param_value }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setFx(slot, { mdl, fxmix, param_index, param_value });
+      return { content: [{ type: "text", text: `fx/${slot} -> ${JSON.stringify(result)}` }] };
+    } catch (err) {
+      return errText(err);
+    }
+  }
+);
+
+server.tool(
+  "set_insert",
+  `Assign a strip pre or post insert to FX1-FX16 or NONE, and/or toggle insert on. Aux has pre only. ${WRITE_AFTER_FIND}`,
+  {
+    kind: stripKind,
+    index: z.number().int().min(1),
+    position: z.enum(["pre", "post"]),
+    on: z.boolean().optional(),
+    fx_slot: z.union([z.number().int().min(1).max(16), z.literal("NONE")]).optional(),
+  },
+  async ({ kind, index, position, on, fx_slot }) => {
+    try {
+      await assertWritable();
+      const result = await wing.setInsert(kind as StripKind, index, position as InsertPosition, { on, fx_slot });
+      return { content: [{ type: "text", text: `${kind}/${index} ${position}ins -> ${JSON.stringify(result)}` }] };
     } catch (err) {
       return errText(err);
     }
