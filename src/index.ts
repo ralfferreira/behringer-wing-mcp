@@ -77,9 +77,14 @@ async function assertWritable() {
   await wing.assertOscWritable();
 }
 
+const WRITE_AFTER_FIND =
+  "REQUIRED before every write when the operator names a strip: call find_strip_by_name first and use the returned kind/index. " +
+  "Never reuse channel numbers from earlier in the chat. The name on the mixer surface (/$name) can differ from the stored /name " +
+  "(example: surface VIOLAO may be stored as SPDS L). If several matches share the top score, ask which strip before writing.";
+
 server.tool(
   "set_fader",
-  "Set a channel/bus/DCA fader level in dB. Use -144 for silence (-oo). Range -144 to +10. Prefer find_strip_by_name first when the operator names a strip.",
+  `Set a channel/bus/DCA fader level in dB. Use -144 for silence (-oo). Range -144 to +10. ${WRITE_AFTER_FIND}`,
   { kind: stripKind, index: z.number().int().min(1), db: z.number().min(-144).max(10) },
   async ({ kind, index, db }) => {
     try {
@@ -94,7 +99,7 @@ server.tool(
 
 server.tool(
   "adjust_fader",
-  "Raise or lower a fader by a relative amount in dB (example: -3 lowers by 3 dB). Prefer find_strip_by_name first when the operator names a strip.",
+  `Raise or lower a fader by a relative amount in dB (example: -3 lowers by 3 dB). ${WRITE_AFTER_FIND}`,
   { kind: stripKind, index: z.number().int().min(1), delta_db: z.number() },
   async ({ kind, index, delta_db }) => {
     try {
@@ -116,7 +121,7 @@ server.tool(
 
 server.tool(
   "set_mute",
-  "Mute or unmute a channel, bus, main, matrix, or DCA. Prefer find_strip_by_name first when the operator names a strip.",
+  `Mute or unmute a channel, bus, main, matrix, or DCA. ${WRITE_AFTER_FIND}`,
   { kind: stripKind, index: z.number().int().min(1), muted: z.boolean() },
   async ({ kind, index, muted }) => {
     try {
@@ -131,7 +136,7 @@ server.tool(
 
 server.tool(
   "set_pan",
-  "Set pan position of a strip. -100 = full left, 0 = center, +100 = full right.",
+  `Set pan position of a strip. -100 = full left, 0 = center, +100 = full right. ${WRITE_AFTER_FIND}`,
   { kind: stripKind, index: z.number().int().min(1), pan: z.number().min(-100).max(100) },
   async ({ kind, index, pan }) => {
     try {
@@ -146,7 +151,7 @@ server.tool(
 
 server.tool(
   "set_name",
-  "Set the scribble strip name of a channel/bus/dca.",
+  `Set the stored scribble-strip /name (not the surface /$name). ${WRITE_AFTER_FIND}`,
   { kind: stripKind, index: z.number().int().min(1), name: z.string().max(16) },
   async ({ kind, index, name }) => {
     try {
@@ -175,7 +180,11 @@ server.tool(
 
 server.tool(
   "find_strip_by_name",
-  "Find strips by the name shown on the mixer surface (and by the stored name if different). Use this before mute/fader changes when the operator says a name like Caixa or VS. If several matches share the top score, ask which one or use an explicit kind/index.",
+  "Find strips by the name shown on the mixer surface, and by the stored name if different. " +
+    "Always use this immediately before mute/fader/pan/name writes when the operator says a name " +
+    "(VS, Caixa, SPDS, Violao, Guitar, etc.). Do not trust channel numbers remembered from earlier turns. " +
+    "Returns name (surface), optional storedName, kind, index, and score. " +
+    "If ambiguous is true or several matches share the top score, ask the operator which strip before writing.",
   {
     query: z.string().min(1),
     kinds: z.array(stripKind).optional().describe("Optional strip kinds to search. Defaults to all kinds."),
@@ -195,7 +204,9 @@ server.tool(
 
 server.tool(
   "list_strips",
-  "List strip IDs with the names shown on the mixer surface. Set include_status to also read fader, mute, and pan.",
+  "List strip IDs with the names shown on the mixer surface (and storedName when it differs). " +
+    "Use for overview only. For a named change, still call find_strip_by_name right before writing. " +
+    "Set include_status to also read fader, mute, and pan.",
   {
     kinds: z.array(stripKind).optional().describe("Optional strip kinds to list. Defaults to all kinds."),
     include_status: z.boolean().optional(),
